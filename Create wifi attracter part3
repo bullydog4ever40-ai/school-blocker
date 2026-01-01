@@ -1,0 +1,42 @@
+const os = require("os");
+
+let lastStats = os.networkInterfaces();
+let lastTime = Date.now();
+
+function getBytes() {
+  const interfaces = os.networkInterfaces();
+  let rx = 0;
+  let tx = 0;
+
+  for (const iface of Object.values(interfaces)) {
+    for (const addr of iface) {
+      if (!addr.internal && addr.family === "IPv4") {
+        rx += addr.rx_bytes || 0;
+        tx += addr.tx_bytes || 0;
+      }
+    }
+  }
+  return { rx, tx };
+}
+
+let last = getBytes();
+
+console.log("Monitoring internet usage (CTRL+C to stop)\n");
+
+setInterval(() => {
+  const now = Date.now();
+  const current = getBytes();
+
+  const seconds = (now - lastTime) / 1000;
+  const download = (current.rx - last.rx) / 1024 / seconds;
+  const upload = (current.tx - last.tx) / 1024 / seconds;
+
+  console.clear();
+  console.log("📡 Network Usage");
+  console.log("----------------------------");
+  console.log(`⬇ Download: ${download.toFixed(2)} KB/s`);
+  console.log(`⬆ Upload:   ${upload.toFixed(2)} KB/s`);
+
+  last = current;
+  lastTime = now;
+}, 1000);
