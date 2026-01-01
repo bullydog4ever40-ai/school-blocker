@@ -1,0 +1,8 @@
+#include <windows.h>
+
+int main() {
+    HWND hwnd = GetConsoleWindow();
+    SetWindowDisplayAffinity(hwnd, WDA_MONITOR);
+    MessageBox(hwnd, "Screen capture is blocked.", "Protected", MB_OK);
+    Sleep(100000);
+}
