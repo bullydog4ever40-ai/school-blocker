@@ -1,0 +1,9 @@
+$path = "$env:USERPROFILE\AppData\LocalLow\CompanyName\GameName\prefs"
+
+$content = @"
+Screenmanager Resolution Width: 3840
+Screenmanager Resolution Height: 2160
+Screenmanager Fullscreen mode: 1
+"@
+
+Set-Content -Path $path -Value $content -Force
